@@ -14,10 +14,34 @@ from .common import (progressBar, random_vector, spherical_dot,
 from .governingeq import governingeq
 from .integration_tools import solve_ivp_random
 from scipy.interpolate import interp1d
+import numba
 
 #@numba.vectorize([numba.float64(numba.complex128),numba.float32(numba.complex64)])
 def abs2(x):
     return x.real**2 + x.imag**2
+
+@numba.njit
+def numba_calc_pumping_rates_func(gamma, intensities, E1, E2, deltas, kvecs, v, d_q, projs, Rijl):
+    # Loop through each laser beam driving this transition:
+    for ll, (kvec, intensity, proj, delta) in enumerate(zip(kvecs, intensities, projs, deltas)):
+        fijq = np.abs(d_q[0]*proj[2] + d_q[1]*proj[1] +d_q[2]*proj[0])**2
+        # Calculate the scattering rate the polarization
+        Rijl[ll] = gamma*intensity/2*fijq/(1 + 4*(-(E2 - E1) + delta - np.dot(kvec, v))**2/gamma**2)
+    return Rijl
+
+@numba.njit
+def numba_add_pumping_rates_func(n_off, n, m_off, m, Rij, Rev):
+    R = Rev
+    # Add the off diagonal components
+    R[n_off:n_off+n, m_off:(m_off+m)] += Rij
+    R[m_off:(m_off+m), n_off:n_off+n] += Rij.T
+
+    # Add the diagonal components.
+    for i in np.arange(n_off, n_off+n):
+        R[i, i] -= np.sum(Rij, axis=1)[i]
+    for i, j in enumerate(np.arange(m_off, m_off+m)):
+        R[j, j] -= np.sum(Rij, axis=0)[i]
+    return R
 
 class force_profile(base_force_profile):
     """
@@ -230,7 +254,8 @@ class rateeq(governingeq):
 
     def _calc_pumping_rates(self, r, v, t, Bhat):
         """
-        This method calculates the pumping rates for each laser beam:
+        This method calculates the pumping rates for each laser beam.
+        Serves as a wrapper to call a numba function to do the calculation.
         """
         for key in self.laserBeams:
             # Extract the relevant d_q matrix:
@@ -254,18 +279,15 @@ class rateeq(governingeq):
             deltas = self.laserBeams[key].delta(t)
 
             projs = self.laserBeams[key].project_pol(Bhat, R=r, t=t)
-
-            # Loop through each laser beam driving this transition:
-            for ll, (kvec, intensity, proj, delta) in enumerate(zip(kvecs, intensities, projs, deltas)):
-                fijq = np.abs(d_q[0]*proj[2] + d_q[1]*proj[1] +d_q[2]*proj[0])**2
-
-                # Finally, calculate the scattering rate the polarization
-                # onto the appropriate basis:
-                self.Rijl[key][ll] = gamma*intensity/2*\
-                    fijq/(1 + 4*(-(E2 - E1) + delta - np.dot(kvec, v))**2/gamma**2)
+            #Calculate the rates
+            self.Rijl[key] = numba_calc_pumping_rates_func(gamma, intensities, E1, E2, deltas, kvecs, v, d_q, np.array(projs), np.array(self.Rijl[key]))
 
 
     def _add_pumping_rates_to_Rev(self):
+        """
+        This method adds the pumping rates for each laser beam.
+        Serves as a wrapper to call a numba function to do the calculation.
+        """
         # Now add the pumping rates into the rate equation propogation matrix:
         for key in self.laserBeams:
             ind = self.hamiltonian.rotated_hamiltonian.laser_keys[key]
@@ -277,15 +299,9 @@ class rateeq(governingeq):
 
             # Sum over all lasers:
             Rij = np.sum(self.Rijl[key], axis=0)
-
-            # Add the off diagonal components:
-            self.Rev[n_off:n_off+n, m_off:(m_off+m)] += Rij
-            self.Rev[m_off:(m_off+m), n_off:n_off+n] += Rij.T
-
-            # Add the diagonal components.
-            self.Rev[(np.arange(n_off, n_off+n), np.arange(n_off, n_off+n))] -= np.sum(Rij, axis=1)
-            self.Rev[(np.arange(m_off, m_off+m), np.arange(m_off, m_off+m))] -= np.sum(Rij, axis=0)
-
+            
+            #Add everything to the matrix components
+            self.Rev = numba_add_pumping_rates_func(n_off, n, m_off, m, Rij, np.array(self.Rev))
 
     def construct_evolution_matrix(self, r, v, t=0., default_axis=np.array([0., 0., 1.])):
         """
