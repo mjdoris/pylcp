@@ -487,18 +487,11 @@ class rateeq(governingeq):
             m = self.hamiltonian.ns[ind[1]]
 
             Ne, Ng = np.meshgrid(N[m_off:(m_off+m)], N[n_off:(n_off+n)], )
- 
-            # for ll, beam in enumerate(self.laserBeams[key].beam_vector):
-            #     kvec = beam.kvec(r, t)
-            #     f[key][:, ll] += kvec*np.sum(self.Rijl[key][ll]*(Ng - Ne), axis=(0,1))
-
-            # F += np.sum(f[key], axis=1)
-            
-            kvecs = np.zeros((3,len(self.laserBeams[key].beam_vector)))
-            for ll, beam in enumerate(self.laserBeams[key].beam_vector):
-                kvecs[:,ll] = beam.kvec(r, t)
                
             if self.use_numba == True:
+                kvecs = np.zeros((3,len(self.laserBeams[key].beam_vector)))
+                for ll, beam in enumerate(self.laserBeams[key].beam_vector):
+                    kvecs[:,ll] = beam.kvec(r, t)
                 F, f[key] = self.numba_force_func(Ne, Ng, kvecs, np.array(self.Rijl[key]))
         
             else:
