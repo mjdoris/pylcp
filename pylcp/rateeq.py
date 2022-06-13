@@ -110,7 +110,7 @@ class rateeq(governingeq):
     def __init__(self, laserBeams, magField, hamitlonian,
                  a=np.array([0., 0., 0.]), include_mag_forces=True,
                  svd_eps=1e-10, r0=np.array([0., 0., 0.]),
-                 v0=np.array([0., 0., 0.])):
+                 v0=np.array([0., 0., 0.]), numba_f=False):
         # First step is to save the imported laserBeams, magField, and
         # hamiltonian.
         super().__init__(laserBeams, magField, hamitlonian,
@@ -162,6 +162,7 @@ class rateeq(governingeq):
 
         # Set up a dictionary to store the profiles.
         self.profile = {}
+        self.use_numba = numba_f
 
 
     def _calc_decay_comp_of_Rev(self, rotated_ham):
@@ -265,8 +266,19 @@ class rateeq(governingeq):
             deltas = self.laserBeams[key].delta(t)
             
             projs = self.laserBeams[key].project_pol(Bhat, R=r, t=t)
+            
             #Calculate the rates
-            self.Rijl[key] = self.numba_calc_pumping_rates_func(gamma, intensities, E1, E2, deltas, np.array(kvecs), v, d_q, np.array(projs), np.array(self.Rijl[key]))
+            if self.use_numba == True:
+                self.Rijl[key] = self.numba_calc_pumping_rates_func(gamma, intensities, E1, E2, deltas, np.array(kvecs), v, d_q, np.array(projs), np.array(self.Rijl[key]))
+            else:
+                # Loop through each laser beam driving this transition:
+                for ll, (kvec, intensity, proj, delta) in enumerate(zip(kvecs, intensities, projs, deltas)):
+                    fijq = np.abs(d_q[0]*proj[2] + d_q[1]*proj[1] +d_q[2]*proj[0])**2
+    
+                    # Finally, calculate the scattering rate the polarization
+                    # onto the appropriate basis:
+                    self.Rijl[key][ll] = gamma*intensity/2*\
+                        fijq/(1 + 4*(-(E2 - E1) + delta - np.dot(kvec, v))**2/gamma**2)
             
     @staticmethod
     @numba.njit
@@ -300,8 +312,18 @@ class rateeq(governingeq):
             # Sum over all lasers:
             Rij = np.sum(self.Rijl[key], axis=0)
             
-            #Add everything to the matrix components
-            self.Rev = self.numba_add_pumping_rates_func(n_off, n, m_off, m, Rij, np.array(self.Rev))
+            if self.use_numba == True:
+                #Add everything to the matrix components
+                self.Rev = self.numba_add_pumping_rates_func(n_off, n, m_off, m, Rij, np.array(self.Rev))
+            else:
+                # Add the off diagonal components:
+                self.Rev[n_off:n_off+n, m_off:(m_off+m)] += Rij
+                self.Rev[m_off:(m_off+m), n_off:n_off+n] += Rij.T
+    
+                # Add the diagonal components.
+                self.Rev[(np.arange(n_off, n_off+n), np.arange(n_off, n_off+n))] -= np.sum(Rij, axis=1)
+                self.Rev[(np.arange(m_off, m_off+m), np.arange(m_off, m_off+m))] -= np.sum(Rij, axis=0)
+
 
     def construct_evolution_matrix(self, r, v, t=0., default_axis=np.array([0., 0., 1.])):
         """
@@ -476,8 +498,16 @@ class rateeq(governingeq):
             for ll, beam in enumerate(self.laserBeams[key].beam_vector):
                 kvecs[:,ll] = beam.kvec(r, t)
                
-            F, f[key] = self.numba_force_func(Ne, Ng, kvecs, np.array(self.Rijl[key]))
+            if self.use_numba == True:
+                F, f[key] = self.numba_force_func(Ne, Ng, kvecs, np.array(self.Rijl[key]))
         
+            else:
+                for ll, beam in enumerate(self.laserBeams[key].beam_vector):
+                    kvec = beam.kvec(r, t)
+                    f[key][:, ll] += kvec*np.sum(self.Rijl[key][ll]*(Ng - Ne), axis=(0,1))
+    
+                F += np.sum(f[key], axis=1)
+                
         fmag = np.array([0., 0., 0.])
         if self.include_mag_forces:
             gradBmag = self.magField.gradFieldMag(r)
