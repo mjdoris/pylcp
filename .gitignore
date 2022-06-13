@@ -139,3 +139,4 @@ dmypy.json
 doc/pylcp.bbl
 doc/pylcp.blg
 doc/pylcp.out
+pylcp/common.py

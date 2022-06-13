@@ -23,10 +23,10 @@ def abs2(x):
 @numba.njit
 def numba_calc_pumping_rates_func(gamma, intensities, E1, E2, deltas, kvecs, v, d_q, projs, Rijl):
     # Loop through each laser beam driving this transition:
-    for ll, (kvec, intensity, proj, delta) in enumerate(zip(kvecs, intensities, projs, deltas)):
+    for ll, (intensity, proj, delta) in enumerate(zip(intensities, projs, deltas)):
         fijq = np.abs(d_q[0]*proj[2] + d_q[1]*proj[1] +d_q[2]*proj[0])**2
         # Calculate the scattering rate the polarization
-        Rijl[ll] = gamma*intensity/2*fijq/(1 + 4*(-(E2 - E1) + delta - np.dot(kvec, v))**2/gamma**2)
+        Rijl[ll] = gamma*intensity/2*fijq/(1 + 4*(-(E2 - E1) + delta - np.dot(kvecs[ll,:], v))**2/gamma**2)
     return Rijl
 
 @numba.njit
@@ -42,6 +42,22 @@ def numba_add_pumping_rates_func(n_off, n, m_off, m, Rij, Rev):
     for i, j in enumerate(np.arange(m_off, m_off+m)):
         R[j, j] -= np.sum(Rij, axis=0)[i]
     return R
+
+@numba.njit
+def numba_force_func(Ne, Ng, kvecs, Rijl):
+    F = np.zeros((3,))
+    f = np.zeros((3, len(kvecs[0,:])))
+
+    for l in range(len(kvecs[0,:])):
+        R = 0
+        for j in range(len(Rijl[l,:,0])):
+            for k in range(len(Rijl[l,0,:])):
+                R = R + Rijl[l, j, k]*(Ng[j,k] - Ne[j,k])
+        for h in range(3):
+            f[h, l] += kvecs[h,l]*R
+    F += np.sum(f, axis=1)
+    
+    return F, f
 
 class force_profile(base_force_profile):
     """
@@ -277,10 +293,10 @@ class rateeq(governingeq):
             kvecs = self.laserBeams[key].kvec(r, t)
             intensities = self.laserBeams[key].intensity(r, t)
             deltas = self.laserBeams[key].delta(t)
-
+            
             projs = self.laserBeams[key].project_pol(Bhat, R=r, t=t)
             #Calculate the rates
-            self.Rijl[key] = numba_calc_pumping_rates_func(gamma, intensities, E1, E2, deltas, kvecs, v, d_q, np.array(projs), np.array(self.Rijl[key]))
+            self.Rijl[key] = numba_calc_pumping_rates_func(gamma, intensities, E1, E2, deltas, np.array(kvecs), v, d_q, np.array(projs), np.array(self.Rijl[key]))
 
 
     def _add_pumping_rates_to_Rev(self):
@@ -449,13 +465,19 @@ class rateeq(governingeq):
             m = self.hamiltonian.ns[ind[1]]
 
             Ne, Ng = np.meshgrid(N[m_off:(m_off+m)], N[n_off:(n_off+n)], )
+ 
+            # for ll, beam in enumerate(self.laserBeams[key].beam_vector):
+            #     kvec = beam.kvec(r, t)
+            #     f[key][:, ll] += kvec*np.sum(self.Rijl[key][ll]*(Ng - Ne), axis=(0,1))
 
+            # F += np.sum(f[key], axis=1)
+            
+            kvecs = np.zeros((3,len(self.laserBeams[key].beam_vector)))
             for ll, beam in enumerate(self.laserBeams[key].beam_vector):
-                kvec = beam.kvec(r, t)
-                f[key][:, ll] += kvec*np.sum(self.Rijl[key][ll]*(Ng - Ne), axis=(0,1))
-
-            F += np.sum(f[key], axis=1)
-
+                kvecs[:,ll] = beam.kvec(r, t)
+               
+            F, f[key] = numba_force_func(Ne, Ng, kvecs, np.array(self.Rijl[key]))
+        
         fmag = np.array([0., 0., 0.])
         if self.include_mag_forces:
             gradBmag = self.magField.gradFieldMag(r)
