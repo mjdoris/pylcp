@@ -1360,7 +1360,39 @@ class laserBeams(object):
         """
         return np.sum(self.electric_field_gradient(R, t), axis=0)
 
+    @staticmethod
+    @numba.njit
+    def numba_project_pol(quant_axis):
+        cosbeta = quant_axis[2]
+        sinbeta = np.sqrt(1-cosbeta**2)
+        if isinstance(cosbeta, float):
+            if np.abs(cosbeta)<1:
+                gamma = np.arctan2(quant_axis[1], quant_axis[0])
+            else:
+                gamma = 0
+            alpha = 0
+        else:
+            gamma = np.zeros(cosbeta.shape)
+            inds = np.abs(quant_axis[2])<1
+            gamma[inds] = np.arctan2(quant_axis[1][inds],
+                                          quant_axis[0][inds])
+            alpha = np.zeros(cosbeta.shape)
 
+        quant_axis = quant_axis.astype('float64')
+
+        D = np.array([
+            [(1+cosbeta)/2*np.exp(-1j*alpha + 1j*gamma),
+              -sinbeta/np.sqrt(2)*np.exp(-1j*alpha),
+              (1-cosbeta)/2*np.exp(-1j*alpha - 1j*gamma)],
+            [sinbeta/np.sqrt(2)*np.exp(1j*gamma),
+              cosbeta,
+              -sinbeta/np.sqrt(2)*np.exp(-1j*gamma)],
+            [(1-cosbeta)/2*np.exp(1j*alpha+1j*gamma),
+              sinbeta/np.sqrt(2),
+              (1+cosbeta)/2*np.exp(1j*alpha-1j*gamma)]
+              ])
+        return D
+    
     def project_pol(self, quant_axis, R=np.array([0., 0., 0.]), t=0, **kwargs):
         """
         Project the polarization onto a quantization axis.
@@ -1387,35 +1419,9 @@ class laserBeams(object):
             The polarization projected onto the quantization axis for all
             laser beams
         """
-        cosbeta = quant_axis[2]
-        sinbeta = np.sqrt(1-cosbeta**2)
-        if isinstance(cosbeta, float):
-            if np.abs(cosbeta)<1:
-                gamma = np.arctan2(quant_axis[1], quant_axis[0])
-            else:
-                gamma = 0
-            alpha = 0
-        else:
-            gamma = np.zeros(cosbeta.shape)
-            inds = np.abs(quant_axis[2])<1
-            gamma[inds] = np.arctan2(quant_axis[1][inds],
-                                         quant_axis[0][inds])
-            alpha = np.zeros(cosbeta.shape)
 
-        quant_axis = quant_axis.astype('float64')
-
-        D = np.array([
-            [(1+cosbeta)/2*np.exp(-1j*alpha + 1j*gamma),
-             -sinbeta/np.sqrt(2)*np.exp(-1j*alpha),
-             (1-cosbeta)/2*np.exp(-1j*alpha - 1j*gamma)],
-            [sinbeta/np.sqrt(2)*np.exp(1j*gamma),
-             cosbeta,
-             -sinbeta/np.sqrt(2)*np.exp(-1j*gamma)],
-            [(1-cosbeta)/2*np.exp(1j*alpha+1j*gamma),
-             sinbeta/np.sqrt(2),
-             (1+cosbeta)/2*np.exp(1j*alpha-1j*gamma)]
-             ])
-
+        D = self.numba_project_pol(quant_axis)
+        
         if quant_axis.shape == (3,) and R.shape == (3,):
             return [D @ beam.pol(R, t) for beam in self.beam_vector]
         else:
